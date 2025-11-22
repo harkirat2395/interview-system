@@ -1,6 +1,7 @@
 """
 Complete AI Interview System - Flask + HTML/JS Camera
 Deployable on: Heroku, Railway, Render, PythonAnywhere
+NO OpenCV REQUIRED - All video capture handled by browser JavaScript
 """
 
 from flask import Flask, render_template, request, jsonify, session, send_file
@@ -10,12 +11,13 @@ import time
 import json
 import tempfile
 import numpy as np
-import cv2
 from datetime import datetime
 from pathlib import Path
 import threading
-
 from queue import Queue
+from PIL import Image
+import io
+
 # AI/ML Imports
 try:
     from deepface import DeepFace
@@ -54,16 +56,30 @@ try:
 except:
     TTS_AVAILABLE = False
 
+# Audio sentiment analysis imports with fallbacks
+try:
+    from speechbrain.pretrained import EncoderClassifier
+    SPEECHBRAIN_AVAILABLE = True
+except:
+    SPEECHBRAIN_AVAILABLE = False
+
+try:
+    from transformers import pipeline
+    TRANSFORMERS_AVAILABLE = True
+except:
+    TRANSFORMERS_AVAILABLE = False
+
 app = Flask(__name__)
-# app.secret_key = 'your-secret-key-change-in-production'
-import os
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+
 # ==================== CONFIGURATION ====================
 
 UPLOAD_FOLDER = 'uploads'
 RESULTS_FOLDER = 'results'
+VIOLATIONS_FOLDER = 'violations'
 Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 Path(RESULTS_FOLDER).mkdir(exist_ok=True)
+Path(VIOLATIONS_FOLDER).mkdir(exist_ok=True)
 
 # Interview Questions
 QUESTIONS = [
@@ -93,9 +109,21 @@ QUESTIONS = [
     }
 ]
 
+# Scoring weights
+SCORING_WEIGHTS = {
+    'fluency': 0.25,
+    'accuracy': 0.25,
+    'confidence': 0.20,
+    'grammar': 0.10,
+    'vocabulary': 0.10,
+    'coherence': 0.07,
+    'fillers': 0.03,
+    'violations_penalty': -0.10
+}
+
 # Violation thresholds
-VIOLATION_THRESHOLD = 3  # Auto-terminate after 3 violations
-MIN_INTEGRITY_SCORE = 40  # Terminate if below this
+VIOLATION_THRESHOLD = 3
+MIN_INTEGRITY_SCORE = 40
 
 # ==================== MODEL LOADING ====================
 
@@ -119,9 +147,9 @@ class ModelManager:
     
     def _load_models(self):
         """Load all AI models once"""
-        print("🔄 Loading AI models...")
+        print("📦 Loading AI models...")
         
-        # DeepFace (auto-loads on first use)
+        # DeepFace
         if DEEPFACE_AVAILABLE:
             try:
                 _ = DeepFace.build_model("Facenet")
@@ -155,11 +183,9 @@ class ModelManager:
         if YOLO_AVAILABLE:
             try:
                 self.models['yolo'] = YOLO("yolov8n.pt")
-                self.models['yolo_cls'] = YOLO("yolov8n-cls.pt")
                 print("✅ YOLO loaded")
             except:
                 self.models['yolo'] = None
-                self.models['yolo_cls'] = None
                 print("⚠️ YOLO failed")
         
         # SentenceTransformer
@@ -170,13 +196,50 @@ class ModelManager:
             except:
                 self.models['sentence'] = None
                 print("⚠️ SentenceTransformer failed")
+        
+        # Audio Sentiment - Primary: SpeechBrain
+        if SPEECHBRAIN_AVAILABLE:
+            try:
+                self.models['audio_sentiment'] = EncoderClassifier.from_hparams(
+                    source="speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
+                )
+                self.models['audio_sentiment_method'] = 'speechbrain'
+                print("✅ SpeechBrain audio sentiment loaded")
+            except:
+                self.models['audio_sentiment'] = None
+                print("⚠️ SpeechBrain failed")
+        
+        # Audio Sentiment - Fallback 1: HuggingFace Transformers
+        if not self.models.get('audio_sentiment') and TRANSFORMERS_AVAILABLE:
+            try:
+                self.models['audio_sentiment'] = pipeline(
+                    "audio-classification",
+                    model="superb/hubert-base-superb-er"
+                )
+                self.models['audio_sentiment_method'] = 'huggingface'
+                print("✅ HuggingFace audio sentiment loaded (fallback)")
+            except:
+                print("⚠️ HuggingFace audio sentiment failed")
+        
+        # Text Sentiment - Fallback 2
+        if TRANSFORMERS_AVAILABLE:
+            try:
+                self.models['text_sentiment'] = pipeline(
+                    "sentiment-analysis",
+                    model="distilbert-base-uncased-finetuned-sst-2-english"
+                )
+                print("✅ Text sentiment loaded")
+            except:
+                self.models['text_sentiment'] = None
+                print("⚠️ Text sentiment failed")
+
 model_manager = None
 
 def get_model_manager():
     """Lazy load models on first request"""
     global model_manager
     if model_manager is None:
-        print("🔄 Initializing model manager...")
+        print("📦 Initializing model manager...")
         model_manager = ModelManager()
         print("✅ Model manager ready")
     return model_manager
@@ -184,29 +247,25 @@ def get_model_manager():
 # ==================== ANALYSIS FUNCTIONS ====================
 
 class FrameAnalyzer:
-    """Analyzes frames for violations and quality"""
+    """Analyzes frames for violations and quality - NO OpenCV required"""
     
     def __init__(self):
         self.models = get_model_manager().models
-        self.blink_history = []  # Track blink state
+        self.blink_history = []
         self.last_blink_state = False
     
     def detect_blink(self, face_landmarks):
         """Detect eye blink using EAR (Eye Aspect Ratio)"""
         try:
-            # Left eye indices
             left_eye = [33, 160, 158, 133, 153, 144]
-            # Right eye indices
             right_eye = [362, 385, 387, 263, 373, 380]
             
             def eye_aspect_ratio(eye_points):
                 landmarks = face_landmarks.landmark
-                # Vertical distances
                 v1 = np.linalg.norm(np.array([landmarks[eye_points[1]].x, landmarks[eye_points[1]].y]) - 
                                    np.array([landmarks[eye_points[5]].x, landmarks[eye_points[5]].y]))
                 v2 = np.linalg.norm(np.array([landmarks[eye_points[2]].x, landmarks[eye_points[2]].y]) - 
                                    np.array([landmarks[eye_points[4]].x, landmarks[eye_points[4]].y]))
-                # Horizontal distance
                 h = np.linalg.norm(np.array([landmarks[eye_points[0]].x, landmarks[eye_points[0]].y]) - 
                                   np.array([landmarks[eye_points[3]].x, landmarks[eye_points[3]].y]))
                 
@@ -217,20 +276,19 @@ class FrameAnalyzer:
             right_ear = eye_aspect_ratio(right_eye)
             avg_ear = (left_ear + right_ear) / 2.0
             
-            # EAR threshold for blink detection
             return avg_ear < 0.21
         except:
             return False
     
     def analyze_frame(self, frame_data):
         """
-        Analyze a single frame
+        Analyze a single frame using PIL instead of OpenCV
         Returns: dict with violations, metrics, and warnings
         """
-        # Decode base64 image
+        # Decode base64 image using PIL
         img_bytes = base64.b64decode(frame_data.split(',')[1])
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = Image.open(io.BytesIO(img_bytes))
+        frame_np = np.array(img)
         
         result = {
             'timestamp': time.time(),
@@ -242,7 +300,9 @@ class FrameAnalyzer:
             'cheating_items': [],
             'lighting_quality': 'good',
             'blink_detected': False,
-            'eye_contact': False
+            'eye_contact': False,
+            'outfit_type': 'unknown',
+            'frame_snapshot': None
         }
         
         # 1. Face Detection with Blink & Eye Contact
@@ -250,7 +310,8 @@ class FrameAnalyzer:
         face_box = None
         
         if self.models.get('face_mesh'):
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Convert RGB to BGR for MediaPipe
+            rgb_frame = frame_np if frame_np.shape[2] == 3 else frame_np[:,:,:3]
             face_results = self.models['face_mesh'].process(rgb_frame)
             
             if face_results.multi_face_landmarks:
@@ -265,10 +326,9 @@ class FrameAnalyzer:
                     })
                     result['multiple_people'] = True
                 
-                # Get face bounding box and analyze single face
                 if num_faces == 1:
                     landmarks = face_results.multi_face_landmarks[0]
-                    h, w = frame.shape[:2]
+                    h, w = frame_np.shape[:2]
                     x_coords = [lm.x * w for lm in landmarks.landmark]
                     y_coords = [lm.y * h for lm in landmarks.landmark]
                     face_box = (
@@ -284,13 +344,11 @@ class FrameAnalyzer:
                         result['blink_detected'] = True
                     self.last_blink_state = is_blinking
                     
-                    # Eye contact detection (simplified)
-                    # Check if face is looking forward (nose tip vs face center)
+                    # Eye contact detection
                     nose_tip = landmarks.landmark[1]
                     face_center_y = np.mean(y_coords) / h
                     face_center_x = np.mean(x_coords) / w
                     
-                    # If nose is roughly centered, assume eye contact
                     x_deviation = abs(nose_tip.x - face_center_x)
                     y_deviation = abs(nose_tip.y - face_center_y)
                     
@@ -307,27 +365,22 @@ class FrameAnalyzer:
                     'message': 'No face detected in frame'
                 })
         
-        # 2. Hand Detection (potential device usage)
+        # 2. Hand Detection
         if self.models.get('hands'):
             try:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb_frame = frame_np if frame_np.shape[2] == 3 else frame_np[:,:,:3]
                 hand_results = self.models['hands'].process(rgb_frame)
                 
                 if hand_results.multi_hand_landmarks:
-                    num_hands = len(hand_results.multi_hand_landmarks)
-                    
-                    # Check for suspicious hand positions (below frame, at ears)
                     for hand_landmarks in hand_results.multi_hand_landmarks:
                         wrist = hand_landmarks.landmark[0]
                         
-                        # Hand near ear (potential phone usage)
-                        if face_box and wrist.y < 0.3:  # Upper part of frame
+                        if face_box and wrist.y < 0.3:
                             result['warnings'].append({
                                 'type': 'suspicious_hand',
                                 'message': 'Hand detected near head (potential device usage)'
                             })
                         
-                        # Hand below visible area (potential typing)
                         if wrist.y > 0.8:
                             result['warnings'].append({
                                 'type': 'suspicious_hand',
@@ -336,15 +389,16 @@ class FrameAnalyzer:
             except:
                 pass
         
-        # 3. Object Detection (cheating items)
+        # 3. Object Detection (cheating items + outfit)
         if self.models.get('yolo'):
             try:
-                detections = self.models['yolo'].predict(frame, conf=0.4, verbose=False)
+                detections = self.models['yolo'].predict(frame_np, conf=0.4, verbose=False)
                 if detections and len(detections) > 0:
                     names = self.models['yolo'].names
                     boxes = detections[0].boxes
                     
                     cheating_items = ['cell phone', 'book', 'laptop', 'tablet']
+                    outfit_items = {'person': 'detected'}
                     
                     for box in boxes:
                         cls_id = int(box.cls[0])
@@ -358,12 +412,17 @@ class FrameAnalyzer:
                                 'object': obj_name
                             })
                             result['cheating_items'].append(obj_name)
+                        
+                        # Simple outfit detection based on person detection
+                        if obj_name.lower() == 'person':
+                            result['outfit_type'] = 'formal'  # Default assumption
             except:
                 pass
         
-        # 4. Lighting Analysis
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        brightness = np.mean(gray)
+        # 4. Lighting Analysis using PIL
+        gray = img.convert('L')
+        gray_np = np.array(gray)
+        brightness = np.mean(gray_np)
         
         if brightness < 60:
             result['lighting_quality'] = 'too_dark'
@@ -381,6 +440,10 @@ class FrameAnalyzer:
         result['metrics']['brightness'] = float(brightness)
         result['metrics']['num_faces'] = num_faces
         
+        # Store snapshot if violation occurred
+        if result['violations']:
+            result['frame_snapshot'] = frame_data
+        
         return result
 
 frame_analyzer = None
@@ -389,10 +452,96 @@ def get_frame_analyzer():
     """Lazy load frame analyzer"""
     global frame_analyzer
     if frame_analyzer is None:
-        print("🔄 Initializing frame analyzer...")
+        print("📦 Initializing frame analyzer...")
         frame_analyzer = FrameAnalyzer()
         print("✅ Frame analyzer ready")
     return frame_analyzer
+
+# ==================== AUDIO ANALYSIS ====================
+
+def analyze_audio_emotion(audio_path):
+    """
+    Analyze audio emotion with fallback chain:
+    1. SpeechBrain
+    2. HuggingFace audio classification
+    3. Text sentiment from transcript
+    """
+    models = get_model_manager().models
+    
+    # Try SpeechBrain first
+    if models.get('audio_sentiment') and models.get('audio_sentiment_method') == 'speechbrain':
+        try:
+            predictions = models['audio_sentiment'].classify_file(audio_path)
+            emotion = predictions[0]
+            return {
+                'emotion': emotion,
+                'confidence': 0.8,
+                'method': 'speechbrain'
+            }
+        except Exception as e:
+            print(f"SpeechBrain failed: {e}")
+    
+    # Try HuggingFace audio classifier
+    if models.get('audio_sentiment') and models.get('audio_sentiment_method') == 'huggingface':
+        try:
+            results = models['audio_sentiment'](audio_path)
+            top_result = results[0]
+            return {
+                'emotion': top_result['label'],
+                'confidence': top_result['score'],
+                'method': 'huggingface_audio'
+            }
+        except Exception as e:
+            print(f"HuggingFace audio failed: {e}")
+    
+    # Fallback to text sentiment
+    if models.get('text_sentiment') and SR_AVAILABLE:
+        try:
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(audio_path) as source:
+                audio_data = recognizer.record(source)
+                transcript = recognizer.recognize_google(audio_data)
+            
+            result = models['text_sentiment'](transcript)[0]
+            return {
+                'emotion': result['label'],
+                'confidence': result['score'],
+                'method': 'text_sentiment'
+            }
+        except:
+            pass
+    
+    return {
+        'emotion': 'neutral',
+        'confidence': 0.5,
+        'method': 'default'
+    }
+
+def analyze_fluency(transcript, duration):
+    """Analyze speech fluency"""
+    if not transcript or duration <= 0:
+        return {
+            'wpm': 0,
+            'word_count': 0,
+            'filler_words': 0,
+            'filler_percentage': 0
+        }
+    
+    words = transcript.split()
+    word_count = len(words)
+    wpm = (word_count / duration) * 60
+    
+    # Count filler words
+    fillers = ['um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally']
+    filler_count = sum(1 for word in words if word.lower() in fillers)
+    filler_percentage = (filler_count / word_count * 100) if word_count > 0 else 0
+    
+    return {
+        'wpm': wpm,
+        'word_count': word_count,
+        'filler_words': filler_count,
+        'filler_percentage': filler_percentage
+    }
 
 # ==================== SESSION MANAGER ====================
 
@@ -404,11 +553,13 @@ class InterviewSession:
         self.start_time = time.time()
         self.frames = []
         self.violations = []
+        self.violation_snapshots = []
         self.current_question = 0
         self.answers = []
         self.integrity_score = 100
-        self.status = 'active' 
-        self.tab_switches = 0 # active, paused, completed, terminated
+        self.status = 'active'
+        self.tab_switches = 0
+        self.blink_count = 0
         self.metadata = {
             'total_frames': 0,
             'frames_with_face': 0,
@@ -426,6 +577,9 @@ class InterviewSession:
         else:
             self.metadata['frames_no_face'] += 1
         
+        if result.get('blink_detected'):
+            self.blink_count += 1
+        
         # Add violations
         for violation in result['violations']:
             self.violations.append({
@@ -434,6 +588,16 @@ class InterviewSession:
                 'question': self.current_question
             })
             self.metadata['total_violations'] += 1
+            
+            # Save violation snapshot
+            if result.get('frame_snapshot'):
+                snapshot_path = os.path.join(
+                    VIOLATIONS_FOLDER,
+                    f"{self.session_id}_v{len(self.violations)}.png"
+                )
+                with open(snapshot_path, 'wb') as f:
+                    f.write(base64.b64decode(result['frame_snapshot'].split(',')[1]))
+                self.violation_snapshots.append(snapshot_path)
             
             # Reduce integrity score
             if violation['severity'] == 'critical':
@@ -467,10 +631,11 @@ class InterviewSession:
             'questions_answered': len(self.answers),
             'current_question': self.current_question,
             'metadata': self.metadata,
-            'tab_switches': self.tab_switches
+            'tab_switches': self.tab_switches,
+            'blink_count': self.blink_count,
+            'violation_snapshots': self.violation_snapshots
         }
 
-# Global sessions store
 sessions = {}
 
 # ==================== ROUTES ====================
@@ -478,7 +643,6 @@ sessions = {}
 @app.route('/')
 def index():
     """Main interview page"""
-    # Initialize new session
     session_id = f"session_{int(time.time())}_{os.urandom(4).hex()}"
     session['session_id'] = session_id
     sessions[session_id] = InterviewSession(session_id)
@@ -511,18 +675,21 @@ def capture_frame():
         'integrity_score': interview_session.integrity_score,
         'violations': result['violations'],
         'warnings': result['warnings'],
-        'should_terminate': interview_session.status == 'terminated'
+        'should_terminate': interview_session.status == 'terminated',
+        'blink_detected': result.get('blink_detected', False),
+        'eye_contact': result.get('eye_contact', False)
     }
     
     if interview_session.status == 'terminated':
         response['reason'] = interview_session.termination_reason
     
     return jsonify(response)
+
 @app.route('/setup_complete', methods=['POST'])
 def setup_complete():
     """Handle setup completion signal from frontend"""
     return jsonify({'status': 'success'})
-# ========================================
+
 @app.route('/submit_answer', methods=['POST'])
 def submit_answer():
     """Submit answer (audio + metadata)"""
@@ -532,7 +699,6 @@ def submit_answer():
         return jsonify({'error': 'Invalid session'}), 400
     
     interview_session = sessions[session_id]
-    
     data = request.get_json()
     
     # Save audio if provided
@@ -573,6 +739,21 @@ def get_status():
     interview_session = sessions[session_id]
     return jsonify(interview_session.get_summary())
 
+@app.route('/log_tab_switch', methods=['POST'])
+def log_tab_switch():
+    session_id = session.get('session_id')
+    if not session_id or session_id not in sessions:
+        return jsonify({'error': 'Invalid session'}), 400
+    
+    sessions[session_id].tab_switches += 1
+    sessions[session_id].integrity_score = max(0, sessions[session_id].integrity_score - 2)
+    
+    return jsonify({
+        'status': 'success',
+        'tab_switches': sessions[session_id].tab_switches,
+        'integrity_score': sessions[session_id].integrity_score
+    })
+
 @app.route('/analyze', methods=['POST'])
 def analyze_interview():
     """Phase 2: Analyze complete interview"""
@@ -582,8 +763,6 @@ def analyze_interview():
         return jsonify({'error': 'Invalid session'}), 400
     
     interview_session = sessions[session_id]
-    
-    # Run comprehensive analysis
     analysis_results = run_post_interview_analysis(interview_session)
     
     return jsonify(analysis_results)
@@ -602,36 +781,44 @@ def results_page():
     return render_template('results.html', 
                          session=interview_session.get_summary(),
                          analysis=analysis)
-@app.route('/log_tab_switch', methods=['POST'])
-def log_tab_switch():
+
+@app.route('/violation_image/<int:index>')
+def violation_image(index):
+    """Serve violation snapshot"""
     session_id = session.get('session_id')
     if not session_id or session_id not in sessions:
-        return jsonify({'error': 'Invalid session'}), 400
+        return "Invalid session", 400
     
-    # Update the count
-    sessions[session_id].tab_switches += 1
-    
-    # Penalty: -2 points for switching tabs
-    sessions[session_id].integrity_score = max(0, sessions[session_id].integrity_score - 2)
-    
+    interview_session = sessions[session_id]
+    if 0 <= index < len(interview_session.violation_snapshots):
+        return send_file(interview_session.violation_snapshots[index], mimetype='image/png')
+    return "Image not found", 404
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
     return jsonify({
-        'status': 'success',
-        'tab_switches': sessions[session_id].tab_switches,
-        'integrity_score': sessions[session_id].integrity_score
+        'status': 'healthy',
+        'timestamp': time.time(),
+        'ready': True
     })
+
 # ==================== PHASE 2 ANALYSIS ====================
 
 def run_post_interview_analysis(interview_session):
     """
-    Comprehensive post-interview analysis
-    Returns hiring decision with detailed metrics
+    Comprehensive post-interview analysis using scoring weights
     """
     results = {
         'overall_score': 0,
         'confidence': 0,
         'nervousness': 0,
         'fluency': 0,
-        'answer_accuracy': 0,
+        'accuracy': 0,
+        'grammar': 0,
+        'vocabulary': 0,
+        'coherence': 0,
+        'filler_penalty': 0,
         'integrity_score': interview_session.integrity_score,
         'questions': [],
         'decision': 'No Hire',
@@ -642,28 +829,35 @@ def run_post_interview_analysis(interview_session):
     
     # Analyze each answer
     for answer in interview_session.answers:
-        # Find the question object that matches this answer
         try:
             question = next(q for q in QUESTIONS if q['id'] == answer['question_id'])
         except StopIteration:
-            continue # Skip if question ID not found
+            continue
 
         question_analysis = {
             'question': question['question'],
             'transcript': answer.get('transcript', ''),
-            'metrics': {}
+            'metrics': {},
+            'voice_emotion': None
         }
         
         # 1. Fluency Analysis
         if answer.get('transcript'):
-            words = answer['transcript'].split()
-            duration = answer.get('duration', 0)
-            wpm = (len(words) / duration) * 60 if duration > 0 else 0
-            question_analysis['metrics']['wpm'] = wpm
-            question_analysis['metrics']['word_count'] = len(words)
+            fluency_metrics = analyze_fluency(
+                answer['transcript'],
+                answer.get('duration', 0)
+            )
+            question_analysis['metrics'].update(fluency_metrics)
         
-        # 2. Answer Accuracy (semantic similarity)
-        # Check if model exists AND transcript exists
+        # 2. Voice Emotion Analysis (with fallback chain)
+        if answer.get('audio_path') and os.path.exists(answer['audio_path']):
+            try:
+                emotion_result = analyze_audio_emotion(answer['audio_path'])
+                question_analysis['voice_emotion'] = emotion_result
+            except Exception as e:
+                print(f"Voice emotion analysis failed: {e}")
+        
+        # 3. Answer Accuracy (semantic similarity)
         if get_model_manager().models.get('sentence') and answer.get('transcript'):
             try:
                 embeddings = get_model_manager().models['sentence'].encode([
@@ -677,62 +871,118 @@ def run_post_interview_analysis(interview_session):
             except:
                 question_analysis['metrics']['accuracy'] = 50
         else:
-            # Default score if model is missing (e.g. Free Tier)
-            question_analysis['metrics']['accuracy'] = 0
+            question_analysis['metrics']['accuracy'] = 50
+        
+        # 4. Grammar Score (simple heuristic)
+        if answer.get('transcript'):
+            words = answer['transcript'].split()
+            # Simple grammar check: proper capitalization, punctuation
+            grammar_score = 70  # Base score
+            if answer['transcript'][0].isupper():
+                grammar_score += 10
+            if any(p in answer['transcript'] for p in ['.', '!', '?']):
+                grammar_score += 10
+            if len(words) > 20:
+                grammar_score += 10
+            question_analysis['metrics']['grammar'] = min(100, grammar_score)
+        
+        # 5. Vocabulary Score (unique word ratio)
+        if answer.get('transcript'):
+            words = answer['transcript'].lower().split()
+            unique_words = set(words)
+            vocab_score = min(100, (len(unique_words) / len(words) * 100) if words else 0)
+            question_analysis['metrics']['vocabulary'] = vocab_score
+        
+        # 6. Coherence Score (sentence structure)
+        if answer.get('transcript'):
+            sentences = [s.strip() for s in answer['transcript'].split('.') if s.strip()]
+            coherence_score = min(100, len(sentences) * 20)  # More sentences = better coherence
+            question_analysis['metrics']['coherence'] = coherence_score
         
         results['questions'].append(question_analysis)
     
     # Calculate overall metrics
     if results['questions']:
-        # Filter out 0s to avoid dragging down average if models failed
+        # Aggregate scores
         accuracies = [q['metrics'].get('accuracy', 0) for q in results['questions']]
-        results['answer_accuracy'] = np.mean(accuracies) if accuracies else 0
+        results['accuracy'] = np.mean(accuracies) if accuracies else 0
         
         wpms = [q['metrics'].get('wpm', 0) for q in results['questions']]
         results['fluency'] = np.mean(wpms) if wpms else 0
+        
+        grammars = [q['metrics'].get('grammar', 0) for q in results['questions']]
+        results['grammar'] = np.mean(grammars) if grammars else 0
+        
+        vocabularies = [q['metrics'].get('vocabulary', 0) for q in results['questions']]
+        results['vocabulary'] = np.mean(vocabularies) if vocabularies else 0
+        
+        coherences = [q['metrics'].get('coherence', 0) for q in results['questions']]
+        results['coherence'] = np.mean(coherences) if coherences else 0
+        
+        fillers = [q['metrics'].get('filler_percentage', 0) for q in results['questions']]
+        results['filler_penalty'] = np.mean(fillers) if fillers else 0
     
-    # === FIX: Calculate Eye Contact & Blinks ===
-    # Get all frames where a face was actually seen
+    # Calculate Eye Contact & Blinks
     face_frames = [f for f in interview_session.frames if f.get('face_detected')]
     total_face_frames = len(face_frames)
     
     if total_face_frames > 0:
-        # Count frames with eye contact
         eye_contact_count = sum(1 for f in face_frames if f.get('eye_contact'))
         results['eye_contact_percentage'] = round((eye_contact_count / total_face_frames) * 100, 1)
         
-        # Count blinks (simple approximation)
-        blink_count = sum(1 for f in face_frames if f.get('blink_detected'))
-        # Approximate blink rate per minute based on session duration
         duration_min = (time.time() - interview_session.start_time) / 60
         if duration_min > 0:
-            results['blink_rate'] = round(blink_count / duration_min, 1)
+            results['blink_rate'] = round(interview_session.blink_count / duration_min, 1)
     
-    # Simplified emotion scores
+    # Confidence and Nervousness (based on violations and emotion)
     results['confidence'] = max(0, 80 - (len(interview_session.violations) * 5))
     results['nervousness'] = min(100, 20 + (len(interview_session.violations) * 5))
     
-    # Calculate overall score
-    results['overall_score'] = (
-        results['confidence'] * 0.25 +
-        results['answer_accuracy'] * 0.30 +
-        results['fluency'] * 0.20 +
-        results['integrity_score'] * 0.25
-    )
+    # Adjust confidence based on voice emotion
+    positive_emotions = ['happy', 'positive', 'confident', 'neutral']
+    for q in results['questions']:
+        if q.get('voice_emotion') and q['voice_emotion']['emotion'].lower() in positive_emotions:
+            results['confidence'] += 5
+            results['nervousness'] -= 5
+    
+    results['confidence'] = max(0, min(100, results['confidence']))
+    results['nervousness'] = max(0, min(100, results['nervousness']))
+    
+    # Calculate overall score using weights
+    score_components = {
+        'fluency': min(100, results['fluency'] / 150 * 100),  # Normalize WPM to 0-100
+        'accuracy': results['accuracy'],
+        'confidence': results['confidence'],
+        'grammar': results['grammar'],
+        'vocabulary': results['vocabulary'],
+        'coherence': results['coherence'],
+        'fillers': max(0, 100 - results['filler_penalty'] * 5)  # Penalty for fillers
+    }
+    
+    overall_score = 0
+    for component, score in score_components.items():
+        weight = SCORING_WEIGHTS.get(component, 0)
+        overall_score += score * weight
+    
+    # Apply violations penalty
+    violation_penalty = len(interview_session.violations) * abs(SCORING_WEIGHTS['violations_penalty']) * 100
+    overall_score = max(0, overall_score - violation_penalty)
+    
+    results['overall_score'] = overall_score
     
     # Make hiring decision
     if results['overall_score'] >= 75 and interview_session.status == 'completed':
         results['decision'] = 'Strong Hire'
-        results['reasons'].append('Excellent overall performance')
+        results['reasons'].append('Excellent overall performance across all metrics')
     elif results['overall_score'] >= 60:
         results['decision'] = 'Hire'
-        results['reasons'].append('Good performance with minor concerns')
+        results['reasons'].append('Good performance with minor areas for improvement')
     elif results['overall_score'] >= 45:
         results['decision'] = 'Maybe'
-        results['reasons'].append('Moderate performance')
+        results['reasons'].append('Moderate performance - requires further evaluation')
     else:
         results['decision'] = 'No Hire'
-        results['reasons'].append('Below expected standards')
+        results['reasons'].append('Performance below expected standards')
     
     if interview_session.status == 'terminated':
         results['decision'] = 'Disqualified'
@@ -741,20 +991,23 @@ def run_post_interview_analysis(interview_session):
     if len(interview_session.violations) > 0:
         results['reasons'].append(f'{len(interview_session.violations)} integrity violations detected')
     
+    if interview_session.tab_switches > 0:
+        results['reasons'].append(f'{interview_session.tab_switches} tab switches detected')
+    
+    # Add specific performance feedback
+    if results['fluency'] < 100:
+        results['reasons'].append('Speech rate below optimal (consider speaking more confidently)')
+    if results['accuracy'] < 60:
+        results['reasons'].append('Answers could be more relevant to questions asked')
+    if results['eye_contact_percentage'] < 60:
+        results['reasons'].append('Limited eye contact with camera')
+    if results['filler_penalty'] > 10:
+        results['reasons'].append('Excessive use of filler words (um, uh, like)')
+    
     return results
-@app.route('/health')
-def health():
-    """Health check endpoint for Render"""
-    # Don't load models during health check
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': time.time(),
-        'ready': True
-    })
+
 # ==================== RUN ====================
 
-# if __name__ == '__main__':
-#     app.run(debug=True, host='0.0.0.0', port=5000)
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
