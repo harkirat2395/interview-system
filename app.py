@@ -170,8 +170,16 @@ class ModelManager:
             except:
                 self.models['sentence'] = None
                 print("⚠️ SentenceTransformer failed")
+model_manager = None
 
-model_manager = ModelManager()
+def get_model_manager():
+    """Lazy load models on first request"""
+    global model_manager
+    if model_manager is None:
+        print("🔄 Initializing model manager...")
+        model_manager = ModelManager()
+        print("✅ Model manager ready")
+    return model_manager
 
 # ==================== ANALYSIS FUNCTIONS ====================
 
@@ -179,7 +187,7 @@ class FrameAnalyzer:
     """Analyzes frames for violations and quality"""
     
     def __init__(self):
-        self.models = model_manager.models
+        self.models = get_model_manager().models
         self.blink_history = []  # Track blink state
         self.last_blink_state = False
     
@@ -375,7 +383,16 @@ class FrameAnalyzer:
         
         return result
 
-frame_analyzer = FrameAnalyzer()
+frame_analyzer = None
+
+def get_frame_analyzer():
+    """Lazy load frame analyzer"""
+    global frame_analyzer
+    if frame_analyzer is None:
+        print("🔄 Initializing frame analyzer...")
+        frame_analyzer = FrameAnalyzer()
+        print("✅ Frame analyzer ready")
+    return frame_analyzer
 
 # ==================== SESSION MANAGER ====================
 
@@ -479,8 +496,9 @@ def capture_frame():
     
     interview_session = sessions[session_id]
     
-    # Analyze frame
-    result = frame_analyzer.analyze_frame(data['image'])
+    # Analyze frame (lazy load analyzer)
+    analyzer = get_frame_analyzer()
+    result = analyzer.analyze_frame(data['image'])
     
     # Update session
     interview_session.add_frame_result(result)
@@ -616,9 +634,9 @@ def run_post_interview_analysis(interview_session):
             question_analysis['metrics']['word_count'] = len(words)
         
         # 2. Answer Accuracy (semantic similarity)
-        if model_manager.models.get('sentence') and answer['transcript']:
+        if get_model_manager().models.get('sentence') and answer['transcript']:
             try:
-                embeddings = model_manager.models['sentence'].encode([
+                embeddings = get_model_manager.models['sentence'].encode([
                     question['ideal_answer'],
                     answer['transcript']
                 ])
@@ -677,10 +695,11 @@ def run_post_interview_analysis(interview_session):
 @app.route('/health')
 def health():
     """Health check endpoint for Render"""
+    # Don't load models during health check
     return jsonify({
         'status': 'healthy',
         'timestamp': time.time(),
-        'models_loaded': len(model_manager.models) > 0
+        'ready': True
     })
 # ==================== RUN ====================
 
