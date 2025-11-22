@@ -159,6 +159,34 @@
       margin-bottom: 15px;
     }
     
+    .violation-snapshots {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+    
+    .violation-snapshot {
+      background: rgba(0, 0, 0, 0.4);
+      padding: 10px;
+      border-radius: 5px;
+      text-align: center;
+      border: 1px solid rgba(255, 68, 68, 0.3);
+    }
+    
+    .violation-snapshot img {
+      width: 100%;
+      border-radius: 5px;
+      margin-bottom: 10px;
+      border: 2px solid #ff4444;
+    }
+    
+    .violation-snapshot-label {
+      color: #ff6666;
+      font-size: 0.9em;
+      font-weight: 600;
+    }
+    
     .btn {
       padding: 15px 30px;
       border: none;
@@ -192,18 +220,46 @@
       color: #00d4ff;
       font-weight: 600;
     }
+    
+    .score-breakdown {
+      background: rgba(0, 212, 255, 0.1);
+      padding: 20px;
+      border-radius: 10px;
+      margin: 20px 0;
+      border: 1px solid rgba(0, 212, 255, 0.3);
+    }
+    
+    .score-breakdown h3 {
+      color: #00d4ff;
+      margin-bottom: 15px;
+    }
+    
+    @media print {
+      body {
+        background: white;
+        color: black;
+      }
+      .btn {
+        display: none;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>📊 Interview Results</h1>
+      <h1>📊 Interview Results & Analysis</h1>
       <p>Session ID: {{ session.session_id }}</p>
       <p>Duration: {{ "%.1f"|format(session.duration / 60) }} minutes</p>
+      <p>Completed: {{ session.status|upper }}</p>
     </header>
     
     <!-- Decision Box -->
-    {% if 'Strong Hire' in analysis.decision or 'Hire' in analysis.decision %}
+    {% if 'Strong Hire' in analysis.decision %}
+    <div class="decision-box decision-hire">
+      ✅ {{ analysis.decision }}
+    </div>
+    {% elif 'Hire' in analysis.decision %}
     <div class="decision-box decision-hire">
       ✅ {{ analysis.decision }}
     </div>
@@ -237,7 +293,7 @@
       </div>
       <div class="metric-card">
         <div class="metric-label">Answer Accuracy</div>
-        <div class="metric-value">{{ "%.1f"|format(analysis.answer_accuracy) }}%</div>
+        <div class="metric-value">{{ "%.1f"|format(analysis.accuracy) }}%</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Integrity Score</div>
@@ -246,6 +302,43 @@
       <div class="metric-card">
         <div class="metric-label">Violations</div>
         <div class="metric-value">{{ session.total_violations }}</div>
+      </div>
+    </div>
+    
+    <!-- Detailed Score Breakdown -->
+    <div class="score-breakdown">
+      <h3>🎯 Detailed Score Breakdown</h3>
+      <div class="stat-row">
+        <span class="stat-label">Fluency (25%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.fluency) }} WPM</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Accuracy (25%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.accuracy) }}%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Confidence (20%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.confidence) }}%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Grammar (10%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.grammar) }}%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Vocabulary (10%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.vocabulary) }}%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Coherence (7%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.coherence) }}%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Filler Words (3%):</span>
+        <span class="stat-value">{{ "%.1f"|format(analysis.filler_penalty) }}% usage</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Violations Penalty (-10%):</span>
+        <span class="stat-value">{{ session.total_violations }} violations</span>
       </div>
     </div>
     
@@ -263,6 +356,10 @@
         <div class="metric-label">Tab Switches</div>
         <div class="metric-value">{{ session.tab_switches }}</div>
       </div>
+      <div class="metric-card">
+        <div class="metric-label">Nervousness</div>
+        <div class="metric-value">{{ "%.1f"|format(analysis.nervousness) }}%</div>
+      </div>
     </div>
     
     <!-- Reasons -->
@@ -279,7 +376,7 @@
     <div class="section">
       <h2>📈 Session Summary</h2>
       <div class="stat-row">
-        <span class="stat-label">Status:</span>
+        <span class="stat-label">Interview Status:</span>
         <span class="stat-value">{{ session.status|upper }}</span>
       </div>
       <div class="stat-row">
@@ -291,7 +388,7 @@
         <span class="stat-value">{{ session.metadata.total_frames }}</span>
       </div>
       <div class="stat-row">
-        <span class="stat-label">Frames with Face:</span>
+        <span class="stat-label">Frames with Face Detected:</span>
         <span class="stat-value">{{ session.metadata.frames_with_face }}</span>
       </div>
       <div class="stat-row">
@@ -301,35 +398,57 @@
         </span>
       </div>
       <div class="stat-row">
-        <span class="stat-label">Total Blinks:</span>
+        <span class="stat-label">Total Blinks Detected:</span>
         <span class="stat-value">{{ session.blink_count }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Tab/Window Switches:</span>
+        <span class="stat-value">{{ session.tab_switches }}</span>
       </div>
     </div>
     
-    <!-- Violations -->
+    <!-- Violations with Snapshots -->
     {% if session.total_violations > 0 %}
     <div class="violations-section">
       <h3>⚠️ Integrity Violations Detected</h3>
-      <p>Total: {{ session.total_violations }} violation(s)</p>
+      <p style="font-size: 1.1em; margin: 10px 0;">Total Violations: <strong>{{ session.total_violations }}</strong></p>
+      
       {% if session.tab_switches > 0 %}
-      <p style="margin-top: 10px;">• Tab switches: {{ session.tab_switches }}</p>
+      <p style="margin-top: 10px;">• Tab/Window switches: <strong>{{ session.tab_switches }}</strong></p>
       {% endif %}
-      <p style="margin-top: 10px; color: #ffaaaa;">
-        Note: Multiple violations may result in disqualification
+      
+      {% if session.violation_snapshots and session.violation_snapshots|length > 0 %}
+      <h4 style="margin-top: 25px; margin-bottom: 15px; color: #ff6666; font-size: 1.3em;">📸 Violation Screenshots:</h4>
+      <div class="violation-snapshots">
+        {% for i in range(session.violation_snapshots|length) %}
+        <div class="violation-snapshot">
+          <img src="/violation_image/{{ i }}" alt="Violation {{ i + 1 }}" loading="lazy">
+          <div class="violation-snapshot-label">Violation #{{ i + 1 }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p style="margin-top: 15px; color: #ffaaaa;">
+        No violation screenshots captured (violations may have been tab switches or minor warnings).
+      </p>
+      {% endif %}
+      
+      <p style="margin-top: 25px; padding: 15px; background: rgba(139, 0, 0, 0.2); border-radius: 5px; color: #ffaaaa;">
+        ⚠️ <strong>Note:</strong> Multiple violations result in integrity score reduction and may lead to disqualification.
       </p>
     </div>
     {% endif %}
     
     <!-- Question Results -->
     <div class="section">
-      <h2>📝 Question Analysis</h2>
+      <h2>📝 Question-by-Question Analysis</h2>
       {% for q in analysis.questions %}
       <div class="question-result">
         <h3>Question {{ loop.index }}: {{ q.question }}</h3>
         
         {% if q.transcript %}
         <div class="transcript">
-          <strong>Transcript:</strong><br>
+          <strong>📝 Transcript:</strong><br>
           {{ q.transcript if q.transcript else 'No transcript available' }}
         </div>
         {% endif %}
@@ -344,7 +463,7 @@
           
           {% if q.metrics.wpm %}
           <div class="stat-row">
-            <span class="stat-label">Speaking Rate:</span>
+            <span class="stat-label">Speaking Rate (WPM):</span>
             <span class="stat-value">{{ "%.0f"|format(q.metrics.wpm) }} WPM</span>
           </div>
           {% endif %}
@@ -352,18 +471,46 @@
           {% if q.metrics.word_count %}
           <div class="stat-row">
             <span class="stat-label">Word Count:</span>
-            <span class="stat-value">{{ q.metrics.word_count }}</span>
+            <span class="stat-value">{{ q.metrics.word_count }} words</span>
+          </div>
+          {% endif %}
+          
+          {% if q.metrics.grammar %}
+          <div class="stat-row">
+            <span class="stat-label">Grammar Score:</span>
+            <span class="stat-value">{{ "%.0f"|format(q.metrics.grammar) }}%</span>
+          </div>
+          {% endif %}
+          
+          {% if q.metrics.vocabulary %}
+          <div class="stat-row">
+            <span class="stat-label">Vocabulary Richness:</span>
+            <span class="stat-value">{{ "%.0f"|format(q.metrics.vocabulary) }}%</span>
+          </div>
+          {% endif %}
+          
+          {% if q.metrics.coherence %}
+          <div class="stat-row">
+            <span class="stat-label">Coherence Score:</span>
+            <span class="stat-value">{{ "%.0f"|format(q.metrics.coherence) }}%</span>
+          </div>
+          {% endif %}
+          
+          {% if q.metrics.filler_percentage %}
+          <div class="stat-row">
+            <span class="stat-label">Filler Words:</span>
+            <span class="stat-value">{{ "%.1f"|format(q.metrics.filler_percentage) }}% ({{ q.metrics.filler_words }} fillers)</span>
           </div>
           {% endif %}
           
           {% if q.voice_emotion %}
           <div class="stat-row">
-            <span class="stat-label">Voice Emotion:</span>
-            <span class="stat-value">{{ q.voice_emotion.emotion }} ({{ "%.0f"|format(q.voice_emotion.confidence * 100) }}%)</span>
+            <span class="stat-label">Voice Emotion Detected:</span>
+            <span class="stat-value">{{ q.voice_emotion.emotion|title }} ({{ "%.0f"|format(q.voice_emotion.confidence * 100) }}% confidence)</span>
           </div>
           <div class="stat-row">
             <span class="stat-label">Analysis Method:</span>
-            <span class="stat-value">{{ q.voice_emotion.method }}</span>
+            <span class="stat-value">{{ q.voice_emotion.method|replace('_', ' ')|title }}</span>
           </div>
           {% endif %}
         </div>
@@ -372,10 +519,43 @@
     </div>
     
     <!-- Actions -->
-    <div style="text-align: center; margin: 40px 0;">
+    <div style="text-align: center; margin: 40px 0; padding: 20px; background: rgba(0, 0, 0, 0.3); border-radius: 10px;">
+      <h3 style="color: #00d4ff; margin-bottom: 20px;">What's Next?</h3>
       <button class="btn" onclick="window.print()">🖨️ Print Report</button>
+      <button class="btn" onclick="downloadResults()">💾 Download PDF</button>
       <button class="btn" onclick="window.location.href='/'">🔄 New Interview</button>
     </div>
+    
+    <!-- Footer -->
+    <div style="text-align: center; padding: 20px; color: #888; font-size: 0.9em; margin-top: 40px;">
+      <p>AI-Powered Interview Assessment System</p>
+      <p>Powered by MediaPipe, YOLO, DeepFace, SentenceTransformers</p>
+      <p style="margin-top: 10px;">Session Date: {{ session.session_id.split('_')[1] if '_' in session.session_id else 'N/A' }}</p>
+    </div>
   </div>
+
+  <script>
+    function downloadResults() {
+      // Simple download trigger
+      window.print();
+      alert('📄 Use your browser\'s "Save as PDF" option in the print dialog to download the results.');
+    }
+    
+    // Auto-scroll to violations if they exist
+    window.addEventListener('load', function() {
+      const violationsSection = document.querySelector('.violations-section');
+      if (violationsSection && {{ session.total_violations }} > 0) {
+        // Highlight violations section briefly
+        violationsSection.style.animation = 'pulse 2s ease-in-out';
+      }
+    });
+  </script>
+  
+  <style>
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.02); box-shadow: 0 0 30px rgba(255, 68, 68, 0.5); }
+    }
+  </style>
 </body>
 </html>
