@@ -205,7 +205,6 @@
   </style>
 </head>
 <body>
-  <!-- Hidden data container -->
   <div id="app-data" 
        data-questions='{{ questions | tojson }}'
        data-session-id="{{ session_id }}"
@@ -283,19 +282,16 @@
   </div>
 
   <script>
-    // Get data from data attributes to avoid Jinja2 syntax issues
     var QUESTIONS = JSON.parse(document.getElementById('app-data').dataset.questions);
     var SESSION_ID = document.getElementById('app-data').dataset.sessionId;
-    var CAPTURE_INTERVAL = 2000;
+    var CAPTURE_INTERVAL = 3000; // Capture every 3 seconds
     var VIOLATION_THRESHOLD = 3;
     
     var currentQuestion = 0;
     let isRecording = false;
     var originalInterfaceHTML = '';
     let mediaRecorder = null;
-    let videoRecorder = null;
-    let audioChunks = [];
-    let videoChunks = [];
+    let recordedChunks = [];
     let recordingStartTime = 0;
     let timerInterval = null;
     let captureInterval = null;
@@ -312,6 +308,7 @@
       tabSwitches: 0
     };
     
+    // Tab/Window focus detection
     document.addEventListener('visibilitychange', function() {
       if (document.hidden && sessionData.status === 'active' && isRecording) {
         isTabFocused = false;
@@ -356,16 +353,22 @@
     async function init() {
       originalInterfaceHTML = document.getElementById('questionArea').innerHTML;
       try {
+        // Request camera access
         webcamStream = await navigator.mediaDevices.getUserMedia({ 
           video: { width: 640, height: 480 }, 
           audio: true 
         });
         
-        document.getElementById('webcam').srcObject = webcamStream;
+        const videoElement = document.getElementById('webcam');
+        videoElement.srcObject = webcamStream;
+        
         document.getElementById('cameraStatus').textContent = 'Active';
         document.getElementById('cameraStatus').className = 'status-good';
         
-        startSetupPhase();
+        // Wait for video to be ready
+        videoElement.addEventListener('loadeddata', () => {
+          startSetupPhase();
+        });
         
       } catch (err) {
         console.error('Camera access error:', err);
@@ -395,22 +398,7 @@
       const REQUIRED_GOOD_FRAMES = 5;
       
       const setupInterval = setInterval(function() {
-        const video = document.getElementById('webcam');
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0);
-        
-        const imageData = canvas.toDataURL('image/png');
-        
-        fetch('/capture', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: imageData })
-        })
-        .then(res => res.json())
-        .then(data => {
+        captureAndSendFrame(function(data) {
           const isGoodFrame = data.status !== 'terminated' && 
                              !data.should_terminate && 
                              data.violations.length === 0 &&
@@ -467,36 +455,44 @@
       });
     }
     
-    function startContinuousCapture() {
+    function captureAndSendFrame(callback) {
       const video = document.getElementById('webcam');
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 480;
+      const context = canvas.getContext('2d');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
-      captureInterval = setInterval(function() {
-        if (sessionData.status !== 'active') {
-          clearInterval(captureInterval);
-          return;
-        }
+      const imageData = canvas.toDataURL('image/jpeg', 0.7);
+      
+      fetch('/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageData })
+      })
+      .then(res => {
+        if (!res.ok) throw new Error('Server busy');
+        return res.json();
+      })
+      .then(data => {
+        if (callback) callback(data);
+        else handleFrameAnalysis(data);
+      })
+      .catch(err => {
+        console.warn('Frame capture error:', err);
+      });
+    }
+    
+    function startContinuousCapture() {
+      const captureLoop = function() {
+        if (sessionData.status !== 'active') return;
         
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0);
+        captureAndSendFrame();
         
-        const imageData = canvas.toDataURL('image/png');
-        
-        fetch('/capture', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: imageData })
-        })
-        .then(res => res.json())
-        .then(data => {
-          handleFrameAnalysis(data);
-        })
-        .catch(err => {
-          console.error('Frame capture error:', err);
-        });
-      }, CAPTURE_INTERVAL);
+        setTimeout(captureLoop, CAPTURE_INTERVAL);
+      };
+      
+      captureLoop();
     }
     
     function handleFrameAnalysis(data) {
@@ -588,43 +584,43 @@
       document.getElementById('submitBtn').classList.remove('hidden');
       
       try {
-        audioChunks = [];
-        videoChunks = [];
+        recordedChunks = [];
         
-        mediaRecorder = new MediaRecorder(webcamStream, { mimeType: 'audio/webm' });
+        try {
+          mediaRecorder = new MediaRecorder(webcamStream, { mimeType: 'video/webm;codecs=vp8,opus' });
+        } catch (e) {
+          console.warn("Specific mimeType failed, falling back to browser default");
+          mediaRecorder = new MediaRecorder(webcamStream);
+        }
+
         mediaRecorder.ondataavailable = function(event) {
-          audioChunks.push(event.data);
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data);
+          }
         };
+        
         mediaRecorder.start();
         
-        videoRecorder = new MediaRecorder(webcamStream, { mimeType: 'video/webm' });
-        videoRecorder.ondataavailable = function(event) {
-          videoChunks.push(event.data);
-        };
-        videoRecorder.start();
-        
         recordingStartTime = Date.now();
-        
         const duration = QUESTIONS[currentQuestion].duration;
         let remaining = duration;
-        
         document.getElementById('timer').textContent = remaining;
         
         timerInterval = setInterval(function() {
           remaining--;
           document.getElementById('timer').textContent = remaining;
-          
-          if (remaining <= 0) {
-            submitAnswer();
-          }
+          if (remaining <= 0) submitAnswer();
         }, 1000);
         
       } catch (err) {
         console.error('Recording error:', err);
-        alert('❌ Failed to start recording. Please refresh and try again.');
+        alert('❌ Recording failed. Please refresh the page and try again.');
+        isRecording = false;
+        document.getElementById('startBtn').classList.remove('hidden');
+        document.getElementById('submitBtn').classList.add('hidden');
       }
     }
-    
+
     async function submitAnswer() {
       if (!isRecording) return;
       
@@ -636,65 +632,58 @@
       document.getElementById('startBtn').textContent = '⏳ Processing...';
       document.getElementById('startBtn').disabled = true;
       
-      mediaRecorder.stop();
-      videoRecorder.stop();
-      
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-      const videoBlob = new Blob(videoChunks, { type: 'video/webm' });
-      
-      const audioReader = new FileReader();
-      const videoReader = new FileReader();
-      
-      let audioData, videoData;
-      
-      await new Promise(resolve => {
-        audioReader.onloadend = function() {
-          audioData = audioReader.result;
-          resolve();
-        };
-        audioReader.readAsDataURL(audioBlob);
-      });
-      
-      await new Promise(resolve => {
-        videoReader.onloadend = function() {
-          videoData = videoReader.result;
-          resolve();
-        };
-        videoReader.readAsDataURL(videoBlob);
-      });
-      
-      const duration = (Date.now() - recordingStartTime) / 1000;
-      
       try {
-        const response = await fetch('/submit_answer', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            question_id: QUESTIONS[currentQuestion].id,
-            question_text: QUESTIONS[currentQuestion].question,
-            audio: audioData,
-            video: videoData,
-            transcript: '',
-            duration: duration
-          })
-        });
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
+        }
         
-        const result = await response.json();
+        await new Promise(resolve => setTimeout(resolve, 500));
         
-        if (result.status === 'success') {
-          if (result.session_status === 'completed') {
-            completeInterview();
-          } else {
-            loadQuestion(result.next_question);
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        
+        reader.onloadend = async function() {
+          const base64data = reader.result;
+          
+          try {
+            const duration = (Date.now() - recordingStartTime) / 1000;
+            
+            const response = await fetch('/submit_answer', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                question_id: QUESTIONS[currentQuestion].id,
+                question_text: QUESTIONS[currentQuestion].question,
+                audio: base64data,
+                video: base64data,
+                transcript: '',
+                duration: duration
+              })
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+              if (result.session_status === 'completed') {
+                completeInterview();
+              } else {
+                loadQuestion(result.next_question);
+                document.getElementById('startBtn').textContent = '🎤 Start Recording';
+                document.getElementById('startBtn').disabled = false;
+              }
+            }
+          } catch (err) {
+            console.error('Submit fetch error:', err);
+            alert('❌ Failed to upload answer. See console for details.');
             document.getElementById('startBtn').textContent = '🎤 Start Recording';
             document.getElementById('startBtn').disabled = false;
           }
-        }
+        };
       } catch (err) {
-        console.error('Submit error:', err);
-        alert('❌ Failed to submit answer. Please try again.');
+        console.error('Submit processing error:', err);
+        alert('❌ Error processing recording.');
         document.getElementById('startBtn').textContent = '🎤 Start Recording';
         document.getElementById('startBtn').disabled = false;
       }
@@ -702,7 +691,6 @@
     
     function completeInterview() {
       sessionData.status = 'completed';
-      clearInterval(captureInterval);
       
       document.getElementById('questionArea').classList.add('hidden');
       document.getElementById('completionArea').classList.remove('hidden');
@@ -712,14 +700,10 @@
     
     function terminateInterview(reason) {
       sessionData.status = 'terminated';
-      clearInterval(captureInterval);
       clearInterval(timerInterval);
       
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
-      }
-      if (videoRecorder && videoRecorder.state === 'recording') {
-        videoRecorder.stop();
       }
       
       document.getElementById('questionArea').classList.add('hidden');
