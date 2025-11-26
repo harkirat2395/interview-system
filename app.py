@@ -1007,7 +1007,7 @@ def run_post_interview_analysis(interview_session):
     return results
 
 # ==================== RUN ====================
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    # This generates a temporary self-signed cert on the fly
+    app.run(debug=False, host='0.0.0.0', port=port, ssl_context='adhoc')
